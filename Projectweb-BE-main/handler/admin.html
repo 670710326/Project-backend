@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>MangaReader · แอดมิน</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--text:#1d2129;--muted:#6b7280;--line:#e3e6ea;--accent:#4f46e5;--accent-text:#fff;--danger:#dc2626;--ok:#16a34a}
+@media (prefers-color-scheme:dark){:root{--bg:#14161a;--card:#1d2026;--text:#e8eaed;--muted:#9aa0a8;--line:#2d3138;--accent:#7c78ff;--accent-text:#0e0e12;--danger:#f87171;--ok:#4ade80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI","Noto Sans Thai",sans-serif}
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 20px;background:var(--card);border-bottom:1px solid var(--line)}
+header .brand{font-weight:700}
+header .badge{background:var(--accent);color:var(--accent-text);border-radius:6px;padding:1px 8px;font-size:12px;font-weight:700}
+header .spacer{flex:1}
+main{max-width:1000px;margin:0 auto;padding:20px}
+nav.tabs{display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap}
+nav.tabs button{border:1px solid var(--line);background:var(--card);color:var(--text);padding:8px 16px;border-radius:8px;cursor:pointer;font:inherit}
+nav.tabs button.on{background:var(--accent);color:var(--accent-text);border-color:var(--accent)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+h2{margin:0 0 12px;font-size:18px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.stat b{display:block;font-size:28px}
+.stat span{color:var(--muted)}
+button,input,select,textarea{font:inherit;color:var(--text)}
+input,select,textarea{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;width:100%}
+textarea{resize:vertical}
+button.btn{background:var(--accent);color:var(--accent-text);border:0;border-radius:8px;padding:8px 16px;cursor:pointer}
+button.btn.sec{background:transparent;color:var(--text);border:1px solid var(--line)}
+button.btn.danger{background:transparent;color:var(--danger);border:1px solid var(--danger)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.row input[type=search]{flex:1;min-width:180px;width:auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.grid label{display:block;font-size:13px;color:var(--muted);margin-bottom:2px}
+.grid .full{grid-column:1/-1}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{color:var(--muted);font-weight:600;font-size:13px}
+td img{width:36px;height:52px;object-fit:cover;border-radius:4px;background:var(--line);display:block}
+.muted{color:var(--muted)}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+.center{max-width:380px;margin:60px auto}
+.err{color:var(--danger);margin:8px 0}
+details summary{cursor:pointer;font-weight:600}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--ok);color:#06210f;padding:10px 18px;border-radius:10px;z-index:9;max-width:90vw}
+.toast.bad{background:var(--danger);color:#fff}
+.pager{display:flex;gap:8px;align-items:center;margin-top:12px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+(function () {
+  'use strict';
+  var TOKEN_KEY = 'mangahub_token'; // ใช้ key เดียวกับเว็บหลัก จึงล็อกอินร่วมกันได้เมื่อเปิดผ่านพอร์ตเดียวกัน
+  var app = document.getElementById('app');
+  var state = { token: null, me: null, tab: 'overview', mq: '', moff: 0, uq: '' };
+  var PAGE = 50;
+
+  // ---------- helpers (สร้าง DOM ด้วย textContent เท่านั้น ไม่ใช้ innerHTML กับข้อมูลจากผู้ใช้) ----------
+  function add(el, c) {
+    if (c == null || c === false) return;
+    if (Array.isArray(c)) { c.forEach(function (x) { add(el, x); }); return; }
+    el.appendChild(c.nodeType ? c : document.createTextNode(String(c)));
+  }
+  function h(tag, attrs) {
+    var el = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) {
+      var v = attrs[k];
+      if (v == null || v === false) return;
+      if (k === 'class') el.className = v;
+      else if (k.slice(0, 2) === 'on') el.addEventListener(k.slice(2), v);
+      else el.setAttribute(k, v === true ? '' : v);
+    });
+    for (var i = 2; i < arguments.length; i++) add(el, arguments[i]);
+    return el;
+  }
+  function mount(node) { app.textContent = ''; app.appendChild(node); }
+  function toast(msg, bad) {
+    var t = h('div', { class: 'toast' + (bad ? ' bad' : '') }, msg);
+    document.body.appendChild(t);
+    setTimeout(function () { t.remove(); }, 3500);
+  }
+  function getToken() { try { return localStorage.getItem(TOKEN_KEY); } catch (e) { return null; } }
+  function setToken(t) { try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch (e) {} state.token = t; }
+
+  async function api(path, opts) {
+    opts = opts || {};
+    var headers = {};
+    if (opts.body) headers['Content-Type'] = 'application/json';
+    if (state.token) headers.Authorization = 'Bearer ' + state.token;
+    var res = await fetch(path, { method: opts.method || 'GET', headers: headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
+    if (res.status === 204) return null;
+    var data = null;
+    try { data = await res.json(); } catch (e) {}
+    if (!res.ok) {
+      var err = new Error((data && data.error) || ('HTTP ' + res.status));
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  }
+  function onError(e) {
+    if (e.status === 401) { setToken(null); renderLogin('เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่'); }
+    else if (e.status === 403) renderDenied();
+    else toast(e.message || 'เกิดข้อผิดพลาด', true);
+  }
+
+  // ---------- หน้าจอ: ล็อกอิน / ไม่มีสิทธิ์ ----------
+  function renderLogin(msg) {
+    var email = h('input', { type: 'email', required: true, placeholder: 'อีเมล', autocomplete: 'username' });
+    var pass = h('input', { type: 'password', required: true, placeholder: 'รหัสผ่าน', autocomplete: 'current-password' });
+    var err = h('p', { class: 'err' }, msg || '');
+    var btn = h('button', { class: 'btn', type: 'submit' }, 'เข้าสู่ระบบ');
+    var form = h('form', { class: 'card center', onsubmit: async function (ev) {
+      ev.preventDefault();
+      err.textContent = '';
+      btn.disabled = true;
+      try {
+        var data = await api('/api/auth/login', { method: 'POST', body: { email: email.value, password: pass.value } });
+        if (!data.member || data.member.role !== 'admin') {
+          err.textContent = 'บัญชีนี้ไม่ใช่แอดมิน';
+          return;
+        }
+        setToken(data.token);
+        state.me = data.member;
+        renderShell();
+      } catch (e) {
+        err.textContent = e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    } },
+      h('h2', null, 'เมนูแอดมิน'),
+      h('p', { class: 'muted' }, 'เข้าสู่ระบบด้วยบัญชีแอดมิน'),
+      h('p', null, email), h('p', null, pass), err, btn);
+    mount(form);
+  }
+  function renderDenied() {
+    mount(h('div', { class: 'card center' },
+      h('h2', null, 'ไม่มีสิทธิ์เข้าถึง'),
+      h('p', { class: 'muted' }, 'หน้านี้สำหรับแอดมินเท่านั้น'),
+      h('button', { class: 'btn sec', onclick: function () { setToken(null); renderLogin(); } }, 'เปลี่ยนบัญชี')));
+  }
+
+  // ---------- โครงหน้า + แท็บ ----------
+  var content;
+  function renderShell() {
+    var tabs = [['overview', 'ภาพรวม'], ['manga', 'มังงะ'], ['members', 'สมาชิก']];
+    var nav = h('nav', { class: 'tabs' }, tabs.map(function (t) {
+      return h('button', { class: state.tab === t[0] ? 'on' : '', onclick: function () { state.tab = t[0]; renderShell(); } }, t[1]);
+    }));
+    content = h('div', null);
+    mount(h('div', null,
+      h('header', null,
+        h('span', { class: 'brand' }, 'MangaReader'), h('span', { class: 'badge' }, 'ADMIN'),
+        h('span', { class: 'spacer' }),
+        h('span', { class: 'muted' }, state.me.display_name || state.me.email),
+        h('a', { href: '/', class: 'muted' }, 'กลับหน้าเว็บ'),
+        h('button', { class: 'btn sec', onclick: function () { setToken(null); renderLogin(); } }, 'ออกจากระบบ')),
+      h('main', null, nav, content)));
+    if (state.tab === 'overview') tabOverview();
+    else if (state.tab === 'manga') tabManga();
+    else tabMembers();
+  }
+
+  // ---------- แท็บ: ภาพรวม ----------
+  async function tabOverview() {
+    var box = h('div', { class: 'stats' });
+    var syncBtn = h('button', { class: 'btn', onclick: async function () {
+      syncBtn.disabled = true; syncBtn.textContent = 'กำลังดึงข้อมูล…';
+      try { var r = await api('/api/admin/sync', { method: 'POST' }); toast('ดึงมังงะจาก MangaDex ' + r.synced + ' เรื่อง'); tabOverview(); }
+      catch (e) { onError(e); }
+      finally { syncBtn.disabled = false; syncBtn.textContent = 'ดึงมังงะยอดนิยมจาก MangaDex'; }
+    } }, 'ดึงมังงะยอดนิยมจาก MangaDex');
+    content.textContent = '';
+    add(content, [box, h('div', { class: 'card', style: 'margin-top:16px' },
+      h('h2', null, 'เครื่องมือ'),
+      h('p', { class: 'muted' }, 'ดึงมังงะยอดนิยม 100 เรื่องเข้าฐานข้อมูล (เรื่องที่เคยลบไปแล้วจะไม่ถูกดึงกลับมา)'),
+      syncBtn)]);
+    try {
+      var s = await api('/api/admin/stats');
+      [['mangas', 'มังงะ'], ['members', 'สมาชิก'], ['chapters', 'ตอน']].forEach(function (p) {
+        box.appendChild(h('div', { class: 'stat' }, h('b', null, String(s[p[0]])), h('span', null, p[1])));
+      });
+    } catch (e) { onError(e); }
+  }
+
+  // ---------- แท็บ: มังงะ ----------
+  async function tabManga() {
+    content.textContent = '';
+    var f = {};
+    function field(key, label, el, full) {
+      f[key] = el;
+      return h('div', { class: full ? 'full' : '' }, h('label', null, label), el);
+    }
+    var addErr = h('p', { class: 'err' });
+    var addBtn = h('button', { class: 'btn', type: 'submit' }, 'เพิ่มมังงะ');
+    var rating = h('select', null,
+      h('option', { value: '' }, '— ไม่ระบุ —'), h('option', { value: 'safe' }, 'safe'), h('option', { value: 'suggestive' }, 'suggestive'),
+      h('option', { value: 'erotica' }, 'erotica'), h('option', { value: 'pornographic' }, 'pornographic'));
+    var addForm = h('form', { onsubmit: async function (ev) {
+      ev.preventDefault(); addErr.textContent = ''; addBtn.disabled = true;
+      try {
+        var m = await api('/api/admin/manga', { method: 'POST', body: {
+          title: f.title.value, title_th: f.title_th.value, cover_url: f.cover_url.value,
+          original_language: f.lang.value, content_rating: f.rating.value, description: f.desc.value } });
+        toast('เพิ่ม "' + m.title + '" แล้ว');
+        addForm.reset(); loadList();
+      } catch (e) { if (e.status === 401 || e.status === 403) onError(e); else addErr.textContent = e.message; }
+      finally { addBtn.disabled = false; }
+    } },
+      h('div', { class: 'grid' },
+        field('title', 'ชื่อเรื่อง *', h('input', { required: true, maxlength: 300 })),
+        field('title_th', 'ชื่อภาษาไทย', h('input', { maxlength: 300 })),
+        field('cover_url', 'ลิงก์รูปปก (https://…)', h('input', { type: 'url' })),
+        field('lang', 'ภาษาต้นฉบับ (เช่น ja)', h('input', { maxlength: 10 })),
+        field('rating', 'เรตติ้งเนื้อหา', rating),
+        field('desc', 'เรื่องย่อ', h('textarea', { rows: 3 }), true)),
+      addErr, h('div', { class: 'row' }, addBtn));
+
+    var impIn = h('input', { placeholder: 'วาง MangaDex id หรือลิงก์ เช่น https://mangadex.org/title/…', required: true });
+    var impBtn = h('button', { class: 'btn', type: 'submit' }, 'นำเข้า');
+    var impForm = h('form', { class: 'row', onsubmit: async function (ev) {
+      ev.preventDefault(); impBtn.disabled = true; impBtn.textContent = 'กำลังนำเข้า…';
+      try { var m = await api('/api/admin/manga/import', { method: 'POST', body: { mangadex_id: impIn.value } }); toast('นำเข้า "' + m.title + '" แล้ว'); impIn.value = ''; loadList(); }
+      catch (e) { onError(e); }
+      finally { impBtn.disabled = false; impBtn.textContent = 'นำเข้า'; }
+    } }, impIn, impBtn);
+    impIn.style.flex = '1'; impIn.style.width = 'auto';
+
+    var search = h('input', { type: 'search', placeholder: 'ค้นหาชื่อมังงะ…', value: state.mq });
+    var listBox = h('div', null);
+    var searchForm = h('form', { class: 'row', onsubmit: function (ev) { ev.preventDefault(); state.mq = search.value.trim(); state.moff = 0; loadList(); } },
+      search, h('button', { class: 'btn', type: 'submit' }, 'ค้นหา'));
+
+    add(content, [
+      h('div', { class: 'card' }, h('details', null, h('summary', null, 'เพิ่มมังงะใหม่'), h('div', { style: 'margin-top:12px' }, addForm))),
+      h('div', { class: 'card' }, h('h2', null, 'นำเข้าจาก MangaDex'), impForm),
+      h('div', { class: 'card' }, h('h2', null, 'รายการมังงะ'), searchForm, listBox)]);
+
+    async function loadList() {
+      listBox.textContent = 'กำลังโหลด…';
+      try {
+        var d = await api('/api/manga?q=' + encodeURIComponent(state.mq) + '&limit=' + PAGE + '&offset=' + state.moff);
+        var items = d.items || [];
+        listBox.textContent = '';
+        if (!items.length) { add(listBox, h('p', { class: 'muted' }, 'ไม่พบมังงะ')); }
+        else {
+          var tbody = h('tbody', null);
+          items.forEach(function (m) {
+            tbody.appendChild(h('tr', null,
+              h('td', null, m.cover_url ? h('img', { src: m.cover_url, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer' }) : ''),
+              h('td', null, h('div', null, m.title), m.title_th ? h('div', { class: 'muted' }, m.title_th) : ''),
+              h('td', { class: 'mono muted' }, m.id.slice(0, 8)),
+              h('td', null, h('button', { class: 'btn danger', onclick: async function () {
+                if (!confirm('ลบ "' + m.title + '" ?\nตอนและบุ๊กมาร์กของเรื่องนี้จะถูกลบด้วย')) return;
+                try { await api('/api/admin/manga/' + encodeURIComponent(m.id), { method: 'DELETE' }); toast('ลบแล้ว'); loadList(); }
+                catch (e) { onError(e); }
+              } }, 'ลบ'))));
+          });
+          add(listBox, h('div', { class: 'scroll' }, h('table', null,
+            h('thead', null, h('tr', null, h('th', null, 'ปก'), h('th', null, 'ชื่อเรื่อง'), h('th', null, 'id'), h('th', null, ''))), tbody)));
+        }
+        var prev = h('button', { class: 'btn sec', disabled: state.moff === 0, onclick: function () { state.moff = Math.max(0, state.moff - PAGE); loadList(); } }, '← ก่อนหน้า');
+        var next = h('button', { class: 'btn sec', disabled: items.length < PAGE, onclick: function () { state.moff += PAGE; loadList(); } }, 'ถัดไป →');
+        add(listBox, h('div', { class: 'pager' }, prev, h('span', { class: 'muted' }, 'หน้า ' + (state.moff / PAGE + 1)), next));
+      } catch (e) { listBox.textContent = ''; onError(e); }
+    }
+    loadList();
+  }
+
+  // ---------- แท็บ: สมาชิก ----------
+  async function tabMembers() {
+    content.textContent = '';
+    var search = h('input', { type: 'search', placeholder: 'ค้นหาอีเมลหรือชื่อ…', value: state.uq });
+    var box = h('div', null);
+    var form = h('form', { class: 'row', onsubmit: function (ev) { ev.preventDefault(); state.uq = search.value.trim(); load(); } },
+      search, h('button', { class: 'btn', type: 'submit' }, 'ค้นหา'));
+    add(content, h('div', { class: 'card' }, h('h2', null, 'จัดการสมาชิก'), form, box));
+
+    async function load() {
+      box.textContent = 'กำลังโหลด…';
+      try {
+        var d = await api('/api/admin/members?q=' + encodeURIComponent(state.uq));
+        var items = d.items || [];
+        box.textContent = '';
+        if (!items.length) { add(box, h('p', { class: 'muted' }, 'ไม่พบสมาชิก')); return; }
+        var tbody = h('tbody', null);
+        items.forEach(function (m) {
+          var self = state.me && m.id === state.me.id;
+          var sel = h('select', { disabled: self, style: 'width:auto', onchange: async function () {
+            try { await api('/api/admin/members/' + m.id + '/role', { method: 'PUT', body: { role: sel.value } }); toast('เปลี่ยนสิทธิ์แล้ว'); }
+            catch (e) { onError(e); load(); }
+          } }, h('option', { value: 'member' }, 'สมาชิก'), h('option', { value: 'admin' }, 'แอดมิน'));
+          sel.value = m.role;
+          tbody.appendChild(h('tr', null,
+            h('td', { class: 'muted' }, String(m.id)),
+            h('td', null, m.display_name, self ? h('span', { class: 'muted' }, ' (คุณ)') : ''),
+            h('td', null, m.email),
+            h('td', null, sel),
+            h('td', null, h('button', { class: 'btn danger', disabled: self, onclick: async function () {
+              if (!confirm('ลบสมาชิก ' + m.email + ' ?\nบุ๊กมาร์กของสมาชิกคนนี้จะถูกลบด้วย')) return;
+              try { await api('/api/admin/members/' + m.id, { method: 'DELETE' }); toast('ลบแล้ว'); load(); }
+              catch (e) { onError(e); }
+            } }, 'ลบ'))));
+        });
+        add(box, h('div', { class: 'scroll' }, h('table', null,
+          h('thead', null, h('tr', null, h('th', null, 'id'), h('th', null, 'ชื่อ'), h('th', null, 'อีเมล'), h('th', null, 'สิทธิ์'), h('th', null, ''))), tbody)));
+      } catch (e) { box.textContent = ''; onError(e); }
+    }
+    load();
+  }
+
+  // ---------- เริ่มทำงาน ----------
+  async function boot() {
+    state.token = getToken();
+    if (!state.token) { renderLogin(); return; }
+    mount(h('p', { class: 'muted', style: 'padding:20px' }, 'กำลังตรวจสอบสิทธิ์…'));
+    try {
+      state.me = await api('/api/me');
+    } catch (e) {
+      if (e.status === 401) { setToken(null); renderLogin(); }
+      else mount(h('p', { class: 'err', style: 'padding:20px' }, 'เชื่อมต่อเซิร์ฟเวอร์ไม่ได้: ' + e.message));
+      return;
+    }
+    if (state.me.role !== 'admin') { renderDenied(); return; }
+    renderShell();
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

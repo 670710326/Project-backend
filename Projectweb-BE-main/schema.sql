@@ -34,3 +34,7 @@ CREATE TABLE IF NOT EXISTS bookmarks (
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  PRIMARY KEY(member_id,manga_id)
 );
+CREATE TABLE IF NOT EXISTS blocked_mangas (
+ id TEXT PRIMARY KEY,
+ blocked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

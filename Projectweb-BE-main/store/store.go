@@ -4,11 +4,16 @@ import (
 	"context"
 	"errors"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"strings"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound  = errors.New("not found")
+	ErrDuplicate = errors.New("duplicate")
+	ErrLastAdmin = errors.New("last admin")
+)
 
 type Store struct{ Pool *pgxpool.Pool }
 type Member struct {
@@ -47,6 +52,10 @@ func (s *Store) MemberByEmail(c context.Context, e string) (Member, error) {
 func (s *Store) CreateMember(c context.Context, e, p, n string) (Member, error) {
 	var m Member
 	err := s.Pool.QueryRow(c, `insert into members(email,password_hash,display_name) values($1,$2,$3) returning id,email,display_name,role`, strings.ToLower(e), p, n).Scan(&m.ID, &m.Email, &m.DisplayName, &m.Role)
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) && pe.Code == "23505" { // unique_violation
+		return m, ErrDuplicate
+	}
 	return m, err
 }
 func (s *Store) MemberByID(c context.Context, id int64) (Member, error) {
@@ -57,8 +66,8 @@ func (s *Store) MemberByID(c context.Context, id int64) (Member, error) {
 	}
 	return m, err
 }
-func (s *Store) SearchManga(c context.Context, q string) ([]Manga, error) {
-	rows, e := s.Pool.Query(c, `select id,title,title_th,cover_url,original_language,content_rating,description from mangas where $1='' or title ilike '%'||$1||'%' or coalesce(title_th,'') ilike '%'||$1||'%' order by title limit 100`, q)
+func (s *Store) SearchManga(c context.Context, q string, limit, offset int) ([]Manga, error) {
+	rows, e := s.Pool.Query(c, `select id,title,title_th,cover_url,original_language,content_rating,description from mangas where $1='' or title ilike '%'||$1||'%' or coalesce(title_th,'') ilike '%'||$1||'%' order by title, id limit $2 offset $3`, q, limit, offset)
 	if e != nil {
 		return nil, e
 	}
@@ -122,8 +131,8 @@ func (s *Store) Stats(c context.Context) (map[string]int, error) {
 	e := s.Pool.QueryRow(c, `select (select count(*) from mangas),(select count(*) from members),(select count(*) from chapters)`).Scan(&a, &b, &d)
 	return map[string]int{"mangas": a, "members": b, "chapters": d}, e
 }
-func (s *Store) Members(c context.Context) ([]Member, error) {
-	rows, e := s.Pool.Query(c, `select id,email,display_name,role from members order by id desc`)
+func (s *Store) Members(c context.Context, q string) ([]Member, error) {
+	rows, e := s.Pool.Query(c, `select id,email,display_name,role from members where $1='' or email ilike '%'||$1||'%' or display_name ilike '%'||$1||'%' order by id desc limit 500`, q)
 	if e != nil {
 		return nil, e
 	}
@@ -140,9 +149,13 @@ func (s *Store) Members(c context.Context) ([]Member, error) {
 }
 func (s *Store) SetRole(c context.Context, id int64, role string) (Member, error) {
 	var m Member
-	e := s.Pool.QueryRow(c, `update members set role=$2 where id=$1 returning id,email,display_name,role`, id, role).Scan(&m.ID, &m.Email, &m.DisplayName, &m.Role)
+	// ห้ามลดสิทธิ์แอดมินคนสุดท้าย ไม่งั้นจะไม่เหลือใครจัดการระบบได้
+	e := s.Pool.QueryRow(c, `update members set role=$2::text where id=$1 and ($2::text='admin' or role<>'admin' or (select count(*) from members where role='admin')>1) returning id,email,display_name,role`, id, role).Scan(&m.ID, &m.Email, &m.DisplayName, &m.Role)
 	if errors.Is(e, pgx.ErrNoRows) {
-		return m, ErrNotFound
+		if _, e2 := s.MemberByID(c, id); e2 != nil {
+			return m, e2 // ErrNotFound หรือ error อื่น
+		}
+		return m, ErrLastAdmin
 	}
 	return m, e
 }

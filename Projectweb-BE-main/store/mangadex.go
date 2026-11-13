@@ -12,24 +12,30 @@ import (
 
 const md = "https://api.mangadex.org"
 
-type mdResp struct {
-	Data []struct {
-		ID         string `json:"id"`
+type mdManga struct {
+	ID         string `json:"id"`
+	Attributes struct {
+		Title            map[string]string   `json:"title"`
+		AltTitles        []map[string]string `json:"altTitles"`
+		Description      map[string]string   `json:"description"`
+		OriginalLanguage string              `json:"originalLanguage"`
+		ContentRating    string              `json:"contentRating"`
+	} `json:"attributes"`
+	Relationships []struct {
+		ID, Type   string
 		Attributes struct {
-			Title            map[string]string   `json:"title"`
-			AltTitles        []map[string]string `json:"altTitles"`
-			Description      map[string]string   `json:"description"`
-			OriginalLanguage string              `json:"originalLanguage"`
-			ContentRating    string              `json:"contentRating"`
+			FileName string `json:"fileName"`
 		} `json:"attributes"`
-		Relationships []struct {
-			ID, Type   string
-			Attributes struct {
-				FileName string `json:"fileName"`
-			} `json:"attributes"`
-		} `json:"relationships"`
-	} `json:"data"`
-	Result string `json:"result"`
+	} `json:"relationships"`
+}
+
+type mdResp struct {
+	Data   []mdManga `json:"data"`
+	Result string    `json:"result"`
+}
+
+type mdOne struct {
+	Data mdManga `json:"data"`
 }
 
 func mdGet(ctx context.Context, path string, v any) error {
@@ -44,11 +50,47 @@ func mdGet(ctx context.Context, path string, v any) error {
 		return e
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("MangaDex HTTP 404: %w", ErrNotFound)
+	}
 	if res.StatusCode != 200 {
 		return fmt.Errorf("MangaDex HTTP %d", res.StatusCode)
 	}
 	return json.NewDecoder(res.Body).Decode(v)
 }
+
+// upsertMdManga แปลงข้อมูลมังงะจาก MangaDex แล้วบันทึก/อัปเดตลงตาราง mangas
+func (s *Store) upsertMdManga(ctx context.Context, x mdManga) error {
+	title := x.Attributes.Title["en"]
+	if title == "" {
+		for _, v := range x.Attributes.Title {
+			title = v
+			break
+		}
+	}
+	var th, desc, cover *string
+	for _, a := range x.Attributes.AltTitles {
+		if v := a["th"]; v != "" {
+			th = &v
+			break
+		}
+	}
+	if v := x.Attributes.Description["en"]; v != "" {
+		desc = &v
+	} else if v := x.Attributes.Description["th"]; v != "" {
+		desc = &v
+	}
+	for _, rel := range x.Relationships {
+		if rel.Type == "cover_art" && rel.Attributes.FileName != "" {
+			v := "https://uploads.mangadex.org/covers/" + x.ID + "/" + rel.Attributes.FileName + ".256.jpg"
+			cover = &v
+		}
+	}
+	_, e := s.Pool.Exec(ctx, `insert into mangas(id,title,title_th,cover_url,original_language,content_rating,description) values($1,$2,$3,$4,$5,$6,$7) on conflict(id) do update set title=excluded.title,title_th=excluded.title_th,cover_url=excluded.cover_url,original_language=excluded.original_language,content_rating=excluded.content_rating,description=excluded.description,updated_at=now()`, x.ID, title, th, cover, x.Attributes.OriginalLanguage, x.Attributes.ContentRating, desc)
+	return e
+}
+
+// SyncManga ดึงมังงะยอดนิยมจาก MangaDex (ข้ามเรื่องที่แอดมินลบไปแล้ว)
 func (s *Store) SyncManga(ctx context.Context) (int, error) {
 	q := url.Values{}
 	q.Set("limit", "100")
@@ -59,42 +101,41 @@ func (s *Store) SyncManga(ctx context.Context) (int, error) {
 	if e := mdGet(ctx, "/manga?"+q.Encode(), &r); e != nil {
 		return 0, e
 	}
+	blocked, e := s.blockedSet(ctx)
+	if e != nil {
+		return 0, e
+	}
 	n := 0
 	for _, x := range r.Data {
-		title := x.Attributes.Title["en"]
-		if title == "" {
-			for _, v := range x.Attributes.Title {
-				title = v
-				break
-			}
+		if blocked[x.ID] {
+			continue
 		}
-		var th, desc, cover *string
-		if len(x.Attributes.AltTitles) > 0 {
-			for _, a := range x.Attributes.AltTitles {
-				if v := a["th"]; v != "" {
-					th = &v
-					break
-				}
-			}
-		}
-		if v := x.Attributes.Description["en"]; v != "" {
-			desc = &v
-		} else if v := x.Attributes.Description["th"]; v != "" {
-			desc = &v
-		}
-		for _, rel := range x.Relationships {
-			if rel.Type == "cover_art" && rel.Attributes.FileName != "" {
-				v := "https://uploads.mangadex.org/covers/" + x.ID + "/" + rel.Attributes.FileName + ".256.jpg"
-				cover = &v
-			}
-		}
-		_, e := s.Pool.Exec(ctx, `insert into mangas(id,title,title_th,cover_url,original_language,content_rating,description) values($1,$2,$3,$4,$5,$6,$7) on conflict(id) do update set title=excluded.title,title_th=excluded.title_th,cover_url=excluded.cover_url,original_language=excluded.original_language,content_rating=excluded.content_rating,description=excluded.description,updated_at=now()`, x.ID, title, th, cover, x.Attributes.OriginalLanguage, x.Attributes.ContentRating, desc)
-		if e != nil {
+		if e := s.upsertMdManga(ctx, x); e != nil {
 			return n, e
 		}
 		n++
 	}
 	return n, nil
+}
+
+// ImportManga ดึงมังงะเรื่องเดียวจาก MangaDex ตาม id (แอดมินสั่งเพิ่มเอง จึงปลดจากรายการที่ถูกลบด้วย)
+func (s *Store) ImportManga(ctx context.Context, id string) (Manga, error) {
+	q := url.Values{}
+	q.Add("includes[]", "cover_art")
+	var r mdOne
+	if e := mdGet(ctx, "/manga/"+url.PathEscape(id)+"?"+q.Encode(), &r); e != nil {
+		return Manga{}, e
+	}
+	if r.Data.ID == "" {
+		return Manga{}, ErrNotFound
+	}
+	if e := s.upsertMdManga(ctx, r.Data); e != nil {
+		return Manga{}, e
+	}
+	if _, e := s.Pool.Exec(ctx, `delete from blocked_mangas where id=$1`, r.Data.ID); e != nil {
+		return Manga{}, e
+	}
+	return s.GetManga(ctx, r.Data.ID)
 }
 
 type mdChapterResp struct {
